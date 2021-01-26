@@ -117,8 +117,8 @@ impl TryExpand for syn::Local {
         Ok((
             match self.pat.clone() {
                 syn::Pat::Type(pt) => Ok(*pt.ty),
-                pat => Err(syn::Error::new(
-                    pat.span(),
+                _ => Err(syn::Error::new(
+                    self.span(),
                     "Call locals require explicit type",
                 )),
             }?,
@@ -140,7 +140,7 @@ impl TryExpand for syn::ExprCall {
             syn::Expr::Path(func_expr) => Ok(func_expr),
             func => Err(syn::Error::new(
                 func.span(),
-                "Nesting calls is only allowed for calls by path",
+                "Nesting calls is only allow by path calls",
             )),
         }?;
         let type_path: syn::Type = syn::parse2(func_path.to_token_stream())?;
