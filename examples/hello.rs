@@ -1,22 +1,29 @@
-#![feature(once_cell)]
-
-use std::{lazy::SyncOnceCell, sync::Arc};
+use std::sync::Arc;
 
 use async_std::{io::stdin, sync::RwLock};
 use futures::{executor::LocalPool, task::SpawnExt};
-use moxie2::{StateBuilder, StateGetter, StateSetter};
+use moxie2::{nested, StateBuilder, StateGetter, StateSetter};
 
-fn root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
-    static STATE: SyncOnceCell<(StateGetter<String>, StateSetter<String>)> = SyncOnceCell::new();
-    let state = STATE.get_or_init(|| state_builder.build("World".to_string()));
+#[nested]
+fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
+    #[call_local]
+    let ref mut state: Option<(StateGetter<String>, StateSetter<String>)> = None;
+    let state = state.get_or_insert_with(|| state_builder.build("World".to_string()));
 
     (format!("Hello {}!", state.0.get()), state.1.clone())
 }
 
+#[nested]
+fn root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
+    #[nest]
+    inner_root(state_builder)
+}
+
 async fn async_main(callbacks: Arc<RwLock<Option<StateSetter<String>>>>) {
     let mut state_builder = StateBuilder::new();
+    let mut root_state = root::new();
     loop {
-        let (msg, cb) = root(&mut state_builder);
+        let (msg, cb) = root_state.nest(&mut state_builder);
         println!("{}", msg);
         *callbacks.write().await = Some(cb);
         (&mut state_builder).await;
