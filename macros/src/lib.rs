@@ -1,21 +1,123 @@
-use std::mem::replace;
+use std::{convert::Infallible, mem::replace};
 
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse::Nothing,
+    parse::Parse,
     parse_macro_input, parse_quote,
     spanned::Spanned,
     visit_mut::{self, VisitMut},
 };
 
+const SUFFIX_UUID: &str = "e67dd0c1_f2a8_4161_aa1b_18cdaec4e496";
+
+#[derive(Debug, Clone, Copy)]
+enum Suffix {
+    Type,
+    New,
+    Nest,
+}
+
+impl quote::IdentFragment for Suffix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Suffix::Type => f.write_str("type"),
+            Suffix::New => f.write_str("new"),
+            Suffix::Nest => f.write_str("nest"),
+        }
+    }
+}
+
+impl Parse for Suffix {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let ident: syn::Ident = input.parse()?;
+        match ident.to_string().as_str() {
+            "type" => Ok(Suffix::Type),
+            "new" => Ok(Suffix::New),
+            "nest" => Ok(Suffix::Nest),
+            _ => Err(input.error("expected `type`, `new` or `nest`")),
+        }
+    }
+}
+
+struct NestedInterfaceRequest(syn::Path, Suffix);
+
+impl Parse for NestedInterfaceRequest {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        Ok(Self(input.parse()?, input.parse()?))
+    }
+}
+
+impl NestedInterfaceRequest {
+    fn into_nested_interface(self) -> syn::Result<syn::Path> {
+        self.0.produce_name(self.1)
+    }
+}
+
+fn make_ident_var_ctx() -> syn::Ident {
+    format_ident!("{}_{}_ctx", env!("CARGO_PKG_NAME"), SUFFIX_UUID)
+}
+
+trait MangleFactory: Sized {
+    type Error;
+
+    fn produce_name(&self, suffix: Suffix) -> Result<Self, Self::Error>;
+}
+
+impl MangleFactory for syn::Ident {
+    type Error = Infallible;
+
+    fn produce_name(&self, suffix: Suffix) -> Result<Self, Self::Error> {
+        Ok(format_ident!(
+            "{}_{}_{}_{}",
+            self,
+            env!("CARGO_PKG_NAME"),
+            SUFFIX_UUID,
+            suffix
+        ))
+    }
+}
+
+fn get_path_last_ident(path: &mut syn::Path) -> syn::Result<&mut syn::Ident> {
+    let span = path.span();
+    match path.segments.last_mut() {
+        Some(syn::PathSegment { ident, .. }) => Ok(ident),
+        None => Err(syn::Error::new(span, "Expected a path segment")),
+    }
+}
+impl MangleFactory for syn::Path {
+    type Error = syn::Error;
+
+    fn produce_name(&self, suffix: Suffix) -> Result<Self, Self::Error> {
+        let mut path = self.clone();
+        let ident = get_path_last_ident(&mut path)?;
+        *ident = into_ok(ident.produce_name(suffix));
+        Ok(path)
+    }
+}
+fn into_ok<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(item) => item,
+        Err(_) => unreachable!(),
+    }
+}
+
+#[proc_macro]
+pub fn nested_interface(input: TokenStream) -> TokenStream {
+    match parse_macro_input!(input as NestedInterfaceRequest).into_nested_interface() {
+        Ok(path) => path.into_token_stream(),
+        Err(error) => error.into_compile_error(),
+    }
+    .into()
+}
+
 #[proc_macro_attribute]
 pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
-    parse_macro_input!(args as Nothing);
+    let environment =
+        parse_macro_input!(args as Option<syn::Ident>).unwrap_or(format_ident!("self"));
     let mut item_fn = parse_macro_input!(input as syn::ItemFn);
     let mut nested_fn = NestedFn::default();
-    // visit item_fn in default way
-    visit_mut::visit_item_fn_mut(&mut nested_fn, &mut item_fn);
+    nested_fn.visit_block_mut(&mut item_fn.block);
 
     // TODO add generics support
     let syn::ItemFn {
@@ -43,15 +145,20 @@ pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let struct_types = nested_fn.collection.iter().map(|(ty, _)| ty);
     let struct_inits = nested_fn.collection.iter().map(|(_, expr)| expr);
+
+    let type_ident = into_ok(ident.produce_name(Suffix::Type));
+    let new_fn_ident = into_ok(ident.produce_name(Suffix::New));
+    let nest_fn_ident = into_ok(ident.produce_name(Suffix::Nest));
+    drop(ident);
+
+    let ctx_var_ident = make_ident_var_ctx();
     (quote! {
         #[allow(non_camel_case_types)]
-        struct #ident (#(#struct_types),*);
-        impl #ident {
-            #vis #constness #asyncness #unsafety #abi #fn_token new() -> Self {
-                Self(#(#struct_inits),*)
-            }
-            #(#attrs)* #vis #constness #asyncness #unsafety #abi #fn_token nest #generics (&mut self, #inputs #variadic) #output #block
+        #vis type #type_ident = (#(#struct_types,)*);
+        #vis #constness #asyncness #unsafety #abi #fn_token #new_fn_ident () -> #environment :: #type_ident {
+            (#(#struct_inits,)*)
         }
+        #(#attrs)* #vis #constness #asyncness #unsafety #abi #fn_token #nest_fn_ident #generics (#inputs #ctx_var_ident : &mut #environment :: #type_ident , #variadic) #output #block
     }).into()
 }
 
@@ -114,6 +221,7 @@ trait TryExpand {
 impl TryExpand for syn::Local {
     fn try_expand(&mut self, index: usize) -> syn::Result<(syn::Type, syn::Expr)> {
         let index = syn::Index::from(index);
+        let ctx_ident = make_ident_var_ctx();
         Ok((
             match self.pat.clone() {
                 syn::Pat::Type(pt) => Ok(*pt.ty),
@@ -123,7 +231,7 @@ impl TryExpand for syn::Local {
                 )),
             }?,
             match &mut self.init {
-                Some((_, expr)) => Ok(replace(&mut **expr, parse_quote!(self.#index))),
+                Some((_, expr)) => Ok(replace(&mut **expr, parse_quote!(#ctx_ident . #index))),
                 None => Err(syn::Error::new(
                     self.span(),
                     "Call locals require initialization",
@@ -135,21 +243,48 @@ impl TryExpand for syn::Local {
 
 impl TryExpand for syn::ExprCall {
     fn try_expand(&mut self, index: usize) -> syn::Result<(syn::Type, syn::Expr)> {
-        let index = syn::Index::from(index as usize);
-        let func_path = match &mut *self.func {
-            syn::Expr::Path(func_expr) => Ok(func_expr),
+        let expr_path = match &mut *self.func {
+            syn::Expr::Path(expr_path) => Ok(expr_path),
             func => Err(syn::Error::new(
                 func.span(),
                 "Nesting calls is only allow by path calls",
             )),
         }?;
-        let type_path: syn::Type = syn::parse2(func_path.to_token_stream())?;
-        let new_func_call: syn::Expr = parse_quote!(#func_path::new());
+        let new_path = expr_path.path.produce_name(Suffix::Nest)?;
+        let syn::ExprPath { attrs, qself, path } = syn::ExprPath {
+            path: replace(&mut expr_path.path, new_path),
+            ..expr_path.clone()
+        };
+        drop(expr_path);
 
-        func_path.path.segments.push(parse_quote!(nest));
-        self.args.insert(0, parse_quote!(&mut self.#index));
+        let type_path = syn::Type::Path(syn::TypePath {
+            qself: qself.clone(),
+            path: path.produce_name(Suffix::Type)?,
+        });
+        let new_fn_path = syn::Expr::Path(syn::ExprPath {
+            attrs: attrs.clone(),
+            qself: qself.clone(),
+            path: path.produce_name(Suffix::New)?,
+        });
+        let nest_fn_path = syn::Expr::Path(syn::ExprPath {
+            attrs,
+            qself,
+            path: path.produce_name(Suffix::Nest)?,
+        });
 
-        Ok((type_path, new_func_call))
+        let new_fn_call = syn::Expr::Call(syn::ExprCall {
+            attrs: self.attrs.clone(),
+            func: Box::new(new_fn_path),
+            paren_token: Default::default(),
+            args: Default::default(),
+        });
+
+        let index = syn::Index::from(index);
+        let ctx_ident = make_ident_var_ctx();
+        self.args.push(parse_quote!(&mut #ctx_ident . #index));
+        self.func = Box::new(nest_fn_path);
+
+        Ok((type_path, new_fn_call))
     }
 }
 

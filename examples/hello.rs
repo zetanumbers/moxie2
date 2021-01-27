@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_std::{io::stdin, sync::RwLock};
 use futures::{executor::LocalPool, task::SpawnExt};
-use moxie2::{nested, StateBuilder, StateGetter, StateSetter};
+use moxie2::{nested, nested_interface, StateBuilder, StateGetter, StateSetter};
 
 #[nested]
 fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
@@ -21,9 +21,9 @@ fn root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
 
 async fn async_main(callbacks: Arc<RwLock<Option<StateSetter<String>>>>) {
     let mut state_builder = StateBuilder::new();
-    let mut root_state = root::new();
+    let mut root_state = nested_interface!(root new)();
     loop {
-        let (msg, cb) = root_state.nest(&mut state_builder);
+        let (msg, cb) = nested_interface!(root nest)(&mut state_builder, &mut root_state);
         println!("{}", msg);
         *callbacks.write().await = Some(cb);
         (&mut state_builder).await;
