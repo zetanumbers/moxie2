@@ -1,5 +1,6 @@
 use std::{convert::Infallible, mem::replace};
 
+use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
@@ -40,13 +41,8 @@ impl Parse for Suffix {
     }
 }
 
+#[derive(Parse)]
 struct NestedInterfaceRequest(syn::Path, Suffix);
-
-impl Parse for NestedInterfaceRequest {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        Ok(Self(input.parse()?, input.parse()?))
-    }
-}
 
 impl NestedInterfaceRequest {
     fn into_nested_interface(self) -> syn::Result<syn::Path> {
@@ -111,16 +107,31 @@ pub fn nested_interface(input: TokenStream) -> TokenStream {
     .into()
 }
 
+#[derive(Parse)]
+enum CurrentNamespace {
+    #[peek(syn::Token![Self], name = "SelfType")]
+    SelfType(syn::Token![Self]),
+    #[peek(syn::Token![self], name = "SelfModule")]
+    SelfModule(syn::Token![self]),
+    #[peek_with(|p: syn::parse::ParseStream| p.is_empty(), name = "Inherited")]
+    Inherited,
+}
+
+impl ToTokens for CurrentNamespace {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self {
+            CurrentNamespace::SelfType(token) => quote!(#token ::).to_tokens(tokens),
+            CurrentNamespace::SelfModule(token) => quote!(#token ::).to_tokens(tokens),
+            CurrentNamespace::Inherited => {}
+        }
+    }
+}
+
 #[proc_macro_attribute]
 pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
-    let environment =
-        parse_macro_input!(args as Option<syn::Ident>).unwrap_or(format_ident!("self"));
-    let mut item_fn = parse_macro_input!(input as syn::ItemFn);
-    let mut nested_fn = NestedFn::default();
-    nested_fn.visit_block_mut(&mut item_fn.block);
-
+    let current_namespace: CurrentNamespace = parse_macro_input!(args);
     // TODO add generics support
-    let syn::ItemFn {
+    let ItemNestedFn {
         attrs,
         vis,
         sig:
@@ -137,14 +148,26 @@ pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
                 variadic,
                 output,
             },
-        block,
-    } = item_fn;
+        mut block,
+        semi_token,
+    } = parse_macro_input!(input);
+
     if !inputs.empty_or_trailing() {
         inputs.push_punct(parse_quote!(,))
     }
 
-    let struct_types = nested_fn.collection.iter().map(|(ty, _)| ty);
-    let struct_inits = nested_fn.collection.iter().map(|(_, expr)| expr);
+    let (type_init_assignment, new_fn_block) = if let Some(block) = &mut block {
+        let mut nested_fn_traverser = NestedFnTraverser::default();
+        nested_fn_traverser.visit_block_mut(block);
+        let struct_types = nested_fn_traverser.collection.iter().map(|(ty, _)| ty);
+        let struct_inits = nested_fn_traverser.collection.iter().map(|(_, expr)| expr);
+        (
+            quote!( = (#(#struct_types,)*)),
+            quote!({ (#(#struct_inits,)*) }),
+        )
+    } else {
+        (quote!(), quote!(;))
+    };
 
     let type_ident = into_ok(ident.produce_name(Suffix::Type));
     let new_fn_ident = into_ok(ident.produce_name(Suffix::New));
@@ -154,21 +177,30 @@ pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
     let ctx_var_ident = make_ident_var_ctx();
     (quote! {
         #[allow(non_camel_case_types)]
-        #vis type #type_ident = (#(#struct_types,)*);
-        #vis #constness #asyncness #unsafety #abi #fn_token #new_fn_ident () -> #environment :: #type_ident {
-            (#(#struct_inits,)*)
-        }
-        #(#attrs)* #vis #constness #asyncness #unsafety #abi #fn_token #nest_fn_ident #generics (#inputs #ctx_var_ident : &mut #environment :: #type_ident , #variadic) #output #block
+        #vis type #type_ident #type_init_assignment;
+        #vis #constness #abi #fn_token #new_fn_ident () -> #current_namespace #type_ident #new_fn_block
+        #(#attrs)* #vis #constness #asyncness #unsafety #abi #fn_token #nest_fn_ident #generics (#inputs #ctx_var_ident : &mut #current_namespace #type_ident , #variadic) #output #block #semi_token
     }).into()
 }
 
+#[derive(Parse)]
+struct ItemNestedFn {
+    #[call(syn::Attribute::parse_outer)]
+    attrs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
+    sig: syn::Signature,
+    #[peek(syn::token::Brace)]
+    block: Option<syn::Block>,
+    semi_token: Option<syn::Token![;]>,
+}
+
 #[derive(Default, Debug)]
-struct NestedFn {
+struct NestedFnTraverser {
     collection: Vec<(syn::Type, syn::Expr)>,
     error_occured: bool,
 }
 
-impl NestedFn {
+impl NestedFnTraverser {
     fn transform_add<T>(&mut self, element: &mut T)
     where
         T: TryExpand + EmbededError,
@@ -185,7 +217,7 @@ impl NestedFn {
     }
 }
 
-impl VisitMut for NestedFn {
+impl VisitMut for NestedFnTraverser {
     fn visit_local_mut(&mut self, local: &mut syn::Local) {
         if resolve_attribute(&mut local.attrs, parse_quote!(#[call_local])) {
             self.transform_add(local);
@@ -200,9 +232,11 @@ impl VisitMut for NestedFn {
 
         visit_mut::visit_expr_call_mut(self, call)
     }
-    fn visit_item_fn_mut(&mut self, _: &mut syn::ItemFn) {
-        // prevent visiting nested functions
-    }
+
+    // prevent visiting nested functions
+    fn visit_item_fn_mut(&mut self, _: &mut syn::ItemFn) {}
+    fn visit_trait_item_method_mut(&mut self, _: &mut syn::TraitItemMethod) {}
+    fn visit_impl_item_method_mut(&mut self, _: &mut syn::ImplItemMethod) {}
 }
 
 fn resolve_attribute(attrs: &mut Vec<syn::Attribute>, resolve_attr: syn::Attribute) -> bool {

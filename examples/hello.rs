@@ -4,19 +4,27 @@ use async_std::{io::stdin, sync::RwLock};
 use futures::{executor::LocalPool, task::SpawnExt};
 use moxie2::{nested, nested_interface, StateBuilder, StateGetter, StateSetter};
 
-#[nested]
-fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
-    #[call_local]
-    let ref mut state: Option<(StateGetter<String>, StateSetter<String>)> = None;
-    let state = state.get_or_insert_with(|| state_builder.build("World".to_string()));
+trait InnerRoot {
+    #[nested(Self)]
+    fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>);
+}
 
-    (format!("Hello {}!", state.0.get()), state.1.clone())
+struct Foo;
+impl InnerRoot for Foo {
+    #[nested(Self)]
+    fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
+        #[call_local]
+        let ref mut state: Option<(StateGetter<String>, StateSetter<String>)> = None;
+        let state = state.get_or_insert_with(|| state_builder.build("World".to_string()));
+
+        (format!("Hello {}!", state.0.get()), state.1.clone())
+    }
 }
 
 #[nested]
 fn root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
     #[nest]
-    inner_root(state_builder)
+    <Foo as InnerRoot>::inner_root(state_builder)
 }
 
 async fn async_main(callbacks: Arc<RwLock<Option<StateSetter<String>>>>) {
