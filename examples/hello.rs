@@ -5,13 +5,13 @@ use futures::{executor::LocalPool, task::SpawnExt};
 use moxie2::{nested, nested_interface, StateBuilder, StateGetter, StateSetter};
 
 trait InnerRoot {
-    #[nested(Self)]
+    #[nested(current_namespace = "Self")]
     fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>);
 }
 
 struct Foo;
 impl InnerRoot for Foo {
-    #[nested(Self)]
+    #[nested(current_namespace = "Self")]
     fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
         #[call_local]
         let ref mut state: Option<(StateGetter<String>, StateSetter<String>)> = None;

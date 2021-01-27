@@ -1,5 +1,6 @@
 use std::{convert::Infallible, mem::replace};
 
+use darling::FromMeta;
 use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
@@ -107,29 +108,48 @@ pub fn nested_interface(input: TokenStream) -> TokenStream {
     .into()
 }
 
-#[derive(Parse)]
+#[derive(Debug, FromMeta)]
 enum CurrentNamespace {
-    #[peek(syn::Token![Self], name = "SelfType")]
-    SelfType(syn::Token![Self]),
-    #[peek(syn::Token![self], name = "SelfModule")]
-    SelfModule(syn::Token![self]),
-    #[peek_with(|p: syn::parse::ParseStream| p.is_empty(), name = "Inherited")]
-    Inherited,
+    #[darling(rename = "Self")]
+    SelfType,
+    #[darling(rename = "self")]
+    SelfModule,
 }
 
 impl ToTokens for CurrentNamespace {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match self {
-            CurrentNamespace::SelfType(token) => quote!(#token ::).to_tokens(tokens),
-            CurrentNamespace::SelfModule(token) => quote!(#token ::).to_tokens(tokens),
-            CurrentNamespace::Inherited => {}
+            CurrentNamespace::SelfType => quote!(Self).to_tokens(tokens),
+            CurrentNamespace::SelfModule => quote!(self).to_tokens(tokens),
         }
     }
 }
 
+impl Default for CurrentNamespace {
+    fn default() -> Self {
+        CurrentNamespace::SelfModule
+    }
+}
+
+#[derive(FromMeta)]
+struct AttributeArgs {
+    #[darling(default)]
+    current_namespace: CurrentNamespace,
+}
+
 #[proc_macro_attribute]
 pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
-    let current_namespace: CurrentNamespace = parse_macro_input!(args);
+    let attr_args: syn::AttributeArgs = parse_macro_input!(args);
+
+    let AttributeArgs { current_namespace } = match AttributeArgs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(e.write_errors());
+        }
+    };
+
+    let current_namespace = quote!(#current_namespace ::);
+
     // TODO add generics support
     let ItemNestedFn {
         attrs,
