@@ -134,21 +134,19 @@ impl Default for CurrentNamespace {
 #[derive(FromMeta)]
 struct AttributeArgs {
     #[darling(default)]
-    current_namespace: CurrentNamespace,
+    namespace: CurrentNamespace,
 }
 
 #[proc_macro_attribute]
 pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
     let attr_args: syn::AttributeArgs = parse_macro_input!(args);
 
-    let AttributeArgs { current_namespace } = match AttributeArgs::from_list(&attr_args) {
+    let AttributeArgs { namespace } = match AttributeArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
             return TokenStream::from(e.write_errors());
         }
     };
-
-    let current_namespace = quote!(#current_namespace ::);
 
     // TODO add generics support
     let ItemNestedFn {
@@ -198,8 +196,8 @@ pub fn nested(args: TokenStream, input: TokenStream) -> TokenStream {
     (quote! {
         #[allow(non_camel_case_types)]
         #vis type #type_ident #type_init_assignment;
-        #vis #constness #abi #fn_token #new_fn_ident () -> #current_namespace #type_ident #new_fn_block
-        #(#attrs)* #vis #constness #asyncness #unsafety #abi #fn_token #nest_fn_ident #generics (#inputs #ctx_var_ident : &mut #current_namespace #type_ident , #variadic) #output #block #semi_token
+        #vis #constness #abi #fn_token #new_fn_ident () -> #namespace :: #type_ident #new_fn_block
+        #(#attrs)* #vis #constness #asyncness #unsafety #abi #fn_token #nest_fn_ident #generics (#inputs #ctx_var_ident : &mut #namespace :: #type_ident , #variadic) #output #block #semi_token
     }).into()
 }
 
