@@ -2,36 +2,36 @@ use std::sync::Arc;
 
 use async_std::{io::stdin, sync::RwLock};
 use futures::{executor::LocalPool, task::SpawnExt};
-use moxie2::{nested, nested_interface, StateBuilder, StateGetter, StateSetter};
+use moxie2::{
+    local_slots, local_slots_interface, nested_slots, StateBuilder, StateGetter, StateSetter,
+};
 
 trait InnerRoot {
-    #[nested(namespace = "Self")]
+    #[nested_slots(namespace = "Self")]
     fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>);
 }
 
 struct Foo;
 impl InnerRoot for Foo {
-    #[nested(namespace = "Self")]
+    #[nested_slots(namespace = "Self")]
     fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
-        #[call_local]
-        let ref mut state: Option<(StateGetter<String>, StateSetter<String>)> = None;
+        let state = &mut local_slot!(None as Option<(StateGetter<String>, StateSetter<String>)>);
         let state = state.get_or_insert_with(|| state_builder.build("World".to_string()));
 
         (format!("Hello {}!", state.0.get()), state.1.clone())
     }
 }
 
-#[nested]
+#[nested_slots]
 fn root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
-    #[nest]
-    <Foo as InnerRoot>::inner_root(state_builder)
+    nest![<Foo as InnerRoot>::inner_root(state_builder)]
 }
 
 async fn async_main(callbacks: Arc<RwLock<Option<StateSetter<String>>>>) {
     let mut state_builder = StateBuilder::new();
-    let mut root_state = nested_interface!(root new)();
+    let mut root_state = local_slots_interface!(init root)();
     loop {
-        let (msg, cb) = nested_interface!(root nest)(&mut state_builder, &mut root_state);
+        let (msg, cb) = local_slots_interface!(enter root)(&mut state_builder, &mut root_state);
         println!("{}", msg);
         *callbacks.write().await = Some(cb);
         (&mut state_builder).await;

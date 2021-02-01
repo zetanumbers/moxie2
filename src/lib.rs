@@ -11,7 +11,7 @@ use std::{
 use futures::task::noop_waker;
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard, RwLock, RwLockUpgradableReadGuard};
 
-pub use moxie2_macros::{nested, nested_interface};
+pub use moxie2_macros::{local_slots_interface, nested_slots};
 
 pub struct StateBuilder {
     control: Arc<RwLock<RevisionControl>>,
