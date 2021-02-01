@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use async_std::{io::stdin, sync::RwLock};
 use futures::{executor::LocalPool, task::SpawnExt};
-use moxie2::{
-    local_slots, local_slots_interface, nested_slots, StateBuilder, StateGetter, StateSetter,
-};
+use moxie2::{local_slots_interface, nested_slots, StateBuilder, StateGetter, StateSetter};
 
 trait InnerRoot {
     #[nested_slots(namespace = "Self")]

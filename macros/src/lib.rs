@@ -6,7 +6,6 @@ mod local_slots {
     use crate::utils;
     use darling::FromMeta;
     use derive_syn_parse::Parse;
-    use iroha::ToTokens;
     use proc_macro2::{Span, TokenStream as TokenStream2};
     use quote::{format_ident, quote, TokenStreamExt};
     use syn::spanned::Spanned;
@@ -47,11 +46,14 @@ mod local_slots {
                 let out = syn::parse2(quote! { #ctx : &mut #ty })?;
                 out
             });
+            let vis = &input.vis;
 
             Ok(Api {
-                ty: syn::parse2(quote! { type #type_name #ty_def })?,
+                ty: syn::parse2(
+                    quote! { #[allow(non_camel_case_types)] #vis type #type_name #ty_def },
+                )?,
                 init_fn: syn::parse2(
-                    quote! { fn #init_fn_name () -> #namespace :: #type_name #init_fn_block },
+                    quote! { #vis fn #init_fn_name () -> #namespace :: #type_name #init_fn_block },
                 )?,
                 enter_fn: input,
             })
@@ -126,7 +128,7 @@ mod local_slots {
         path: Option<syn::Path>,
     }
 
-    #[derive(Debug, Clone, Copy, Parse, ToTokens)]
+    #[derive(Debug, Clone, Copy, Parse)]
     pub enum InterfaceTy {
         #[peek(syn::Token![type], name = "Type")]
         Type(syn::Token![type]),
@@ -136,6 +138,17 @@ mod local_slots {
         EnterFn(kw::enter),
         #[peek(kw::context, name = "EnterCtx")]
         EnterCtx(kw::context),
+    }
+
+    impl quote::ToTokens for InterfaceTy {
+        fn to_tokens(&self, tokens: &mut TokenStream2) {
+            match self {
+                InterfaceTy::Type(tk) => tk.to_tokens(tokens),
+                InterfaceTy::InitFn(tk) => tk.to_tokens(tokens),
+                InterfaceTy::EnterFn(tk) => tk.to_tokens(tokens),
+                InterfaceTy::EnterCtx(tk) => tk.to_tokens(tokens),
+            }
+        }
     }
 
     impl quote::IdentFragment for InterfaceTy {
@@ -193,11 +206,24 @@ mod local_slots {
         pub namespace: Namespace,
     }
 
-    #[derive(Debug, Parse, ToTokens, PartialEq, Eq)]
+    #[derive(Debug, Parse, PartialEq, Eq)]
     pub struct Api {
         ty: utils::UniversalItemType,
         init_fn: utils::UniversalItemFn,
         enter_fn: utils::UniversalItemFn,
+    }
+
+    impl quote::ToTokens for Api {
+        fn to_tokens(&self, tokens: &mut TokenStream2) {
+            let Self {
+                ty,
+                init_fn,
+                enter_fn,
+            } = self;
+            ty.to_tokens(tokens);
+            init_fn.to_tokens(tokens);
+            enter_fn.to_tokens(tokens);
+        }
     }
 
     #[derive(FromMeta)]
@@ -262,10 +288,18 @@ mod nested_slots {
                             let mut call: Call = syn::parse2(std::mem::take(tokens))?;
                             // expand `nest!(...)` macro
 
-                            let init_path = InterfaceTy::InitFn(Default::default())
-                                .mangle_path(call.func.path.clone())?;
-                            let type_path = InterfaceTy::Type(Default::default())
-                                .mangle_path(call.func.path.clone())?;
+                            let init_path = syn::ExprPath {
+                                attrs: Vec::new(),
+                                path: InterfaceTy::InitFn(Default::default())
+                                    .mangle_path(call.func.path.clone())?,
+                                qself: call.func.qself.clone(),
+                            };
+                            let type_path = syn::ExprPath {
+                                attrs: Vec::new(),
+                                path: InterfaceTy::Type(Default::default())
+                                    .mangle_path(call.func.path.clone())?,
+                                qself: call.func.qself.clone(),
+                            };
 
                             call.func.path = InterfaceTy::EnterFn(Default::default())
                                 .mangle_path(call.func.path)?;
@@ -298,10 +332,15 @@ mod nested_slots {
 
         impl quote::ToTokens for Call {
             fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-                self.attrs.iter().for_each(|attr| attr.to_tokens(tokens));
-                self.func.to_tokens(tokens);
-                self.paren_token
-                    .surround(tokens, |tokens| self.args.to_tokens(tokens));
+                let Self {
+                    attrs,
+                    func,
+                    paren_token,
+                    args,
+                } = self;
+                attrs.iter().for_each(|attr| attr.to_tokens(tokens));
+                func.to_tokens(tokens);
+                paren_token.surround(tokens, |tokens| args.to_tokens(tokens));
             }
         }
     }
@@ -362,10 +401,9 @@ pub fn nested_slots(args: TokenStream, input: TokenStream) -> TokenStream {
 
 mod utils {
     use derive_syn_parse::Parse;
-    use iroha::ToTokens;
     use syn::punctuated::Punctuated;
 
-    #[derive(Debug, Parse, ToTokens, PartialEq, Eq)]
+    #[derive(Debug, Parse, PartialEq, Eq)]
     pub struct UniversalItemType {
         #[call(syn::Attribute::parse_outer)]
         pub attrs: Vec<syn::Attribute>,
@@ -379,17 +417,63 @@ mod utils {
         pub ty: Option<EqType>,
         pub semi_token: syn::Token![;],
     }
-    #[derive(Debug, Parse, ToTokens, PartialEq, Eq)]
-    pub struct EqType(pub syn::Token![=], pub syn::Type);
 
-    #[derive(Debug, Parse, ToTokens, PartialEq, Eq)]
-    pub struct ColonBounds(
-        pub syn::Token![:],
+    impl quote::ToTokens for UniversalItemType {
+        fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+            let Self {
+                attrs,
+                vis,
+                type_token,
+                ident,
+                generics,
+                bounds,
+                ty,
+                semi_token,
+            } = self;
+            attrs.iter().for_each(|attr| attr.to_tokens(tokens));
+            vis.to_tokens(tokens);
+            type_token.to_tokens(tokens);
+            ident.to_tokens(tokens);
+            generics.to_tokens(tokens);
+            bounds.to_tokens(tokens);
+            ty.to_tokens(tokens);
+            semi_token.to_tokens(tokens);
+        }
+    }
+
+    #[derive(Debug, Parse, PartialEq, Eq)]
+    pub struct EqType {
+        pub eq_token: syn::Token![=],
+        pub ty: syn::Type,
+    }
+
+    impl quote::ToTokens for EqType {
+        fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+            let Self { eq_token, ty } = self;
+            eq_token.to_tokens(tokens);
+            ty.to_tokens(tokens);
+        }
+    }
+
+    #[derive(Debug, Parse, PartialEq, Eq)]
+    pub struct ColonBounds {
+        pub colon_token: syn::Token![:],
         #[call(Punctuated::parse_separated_nonempty)]
-        pub  Punctuated<syn::TypeParamBound, syn::Token![+]>,
-    );
+        pub bounds: Punctuated<syn::TypeParamBound, syn::Token![+]>,
+    }
 
-    #[derive(Debug, Parse, ToTokens, PartialEq, Eq)]
+    impl quote::ToTokens for ColonBounds {
+        fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+            let Self {
+                colon_token,
+                bounds,
+            } = self;
+            colon_token.to_tokens(tokens);
+            bounds.to_tokens(tokens);
+        }
+    }
+
+    #[derive(Debug, Parse, PartialEq, Eq)]
     pub struct UniversalItemFn {
         #[call(syn::Attribute::parse_outer)]
         pub attrs: Vec<syn::Attribute>,
@@ -400,6 +484,26 @@ mod utils {
         pub block: Option<syn::Block>,
         #[peek(syn::Token![;])]
         pub semi_token: Option<syn::Token![;]>,
+    }
+
+    impl quote::ToTokens for UniversalItemFn {
+        fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+            let Self {
+                attrs,
+                vis,
+                defaultness,
+                sig,
+                block,
+                semi_token,
+            } = self;
+
+            attrs.iter().for_each(|attr| attr.to_tokens(tokens));
+            vis.to_tokens(tokens);
+            defaultness.to_tokens(tokens);
+            sig.to_tokens(tokens);
+            block.to_tokens(tokens);
+            semi_token.to_tokens(tokens);
+        }
     }
 }
 
