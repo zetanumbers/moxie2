@@ -166,10 +166,7 @@ mod local_slots {
     ) -> syn::Result<syn::Path> {
         match path {
             Some(path) => interface.mangle_path(path),
-            None => {
-                let ident = interface.into_mangled_ident();
-                Ok(syn::parse_quote!(#ident))
-            }
+            None => syn::parse2(interface.into_mangled_ident().into_token_stream()),
         }
     }
 
