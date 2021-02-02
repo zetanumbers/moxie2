@@ -17,6 +17,12 @@ pub struct StateBuilder {
     control: Arc<RwLock<RevisionControl>>,
 }
 
+impl AsMut<StateBuilder> for StateBuilder {
+    fn as_mut(&mut self) -> &mut StateBuilder {
+        self
+    }
+}
+
 impl StateBuilder {
     pub fn new() -> Self {
         StateBuilder {

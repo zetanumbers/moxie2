@@ -11,13 +11,11 @@ mod local_slots {
     use syn::spanned::Spanned;
 
     pub fn local_slots_impl(
-        Args { namespace }: Args,
+        Args { namespace, bounds }: Args,
         mut input: utils::UniversalItemFn,
     ) -> syn::Result<Api> {
         use syn::visit_mut::VisitMut;
         return {
-            let ctx = InterfaceTy::EnterCtx(Default::default()).into_mangled_ident();
-
             let (ty_def, init_fn_block): (TokenStream2, TokenStream2) =
                 if let Some(block) = &mut input.block {
                     let mut expander = LocalSlotMacroExpander(Vec::new());
@@ -35,6 +33,15 @@ mod local_slots {
                     (quote! {;}, quote! {;})
                 };
 
+            let enter_ctx = InterfaceTy::EnterCtx(Default::default()).into_mangled_ident();
+            let init_ctx_ty = InterfaceTy::InitCtxTy(Default::default()).into_mangled_ident();
+
+            let init_ctx_ty_bounds = if bounds.is_empty() {
+                quote! {}
+            } else {
+                quote! {: #bounds}
+            };
+
             let type_name = InterfaceTy::Type(Default::default()).mangle_ident(&input.sig.ident);
             let init_fn_name =
                 InterfaceTy::InitFn(Default::default()).mangle_ident(&input.sig.ident);
@@ -43,7 +50,7 @@ mod local_slots {
 
             input.sig.inputs.push({
                 let ty: syn::Type = syn::parse2(quote! { #namespace :: #type_name })?;
-                let out = syn::parse2(quote! { #ctx : &mut #ty })?;
+                let out = syn::parse2(quote! { #enter_ctx : &mut #ty })?;
                 out
             });
             let vis = &input.vis;
@@ -52,9 +59,10 @@ mod local_slots {
                 ty: syn::parse2(
                     quote! { #[allow(non_camel_case_types)] #vis type #type_name #ty_def },
                 )?,
-                init_fn: syn::parse2(
-                    quote! { #vis fn #init_fn_name () -> #namespace :: #type_name #init_fn_block },
-                )?,
+                init_fn: syn::parse2(quote! {
+                    #vis fn #init_fn_name <#init_ctx_ty #init_ctx_ty_bounds>
+                    (init_context: &mut #init_ctx_ty) -> #namespace :: #type_name #init_fn_block
+                })?,
                 enter_fn: input,
             })
         };
@@ -112,22 +120,22 @@ mod local_slots {
             fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
                 // replace expr with empty `TokenStream` then process its previous value and assign that back to `*expr`
                 *expr = match std::mem::replace(expr, syn::Expr::Verbatim(Default::default())) {
-                    syn::Expr::Paren(mut expr_paren) => {
-                        *expr_paren.expr = match *expr_paren.expr {
-                            syn::Expr::Cast(cast)
-                                if utils::consume_attribute(
-                                    &mut expr_paren.attrs,
-                                    &syn::parse_quote! {#[local_slot]},
-                                ) =>
-                            {
-                                self.expand_local_slot_macro(cast)
-                                    .map_err(syn::Error::into_compile_error)
-                                    .map_or_else(syn::Expr::Verbatim, syn::Expr::Field)
-                            }
-                            expr => expr,
-                        };
-                        syn::Expr::Paren(expr_paren)
-                    }
+                    syn::Expr::Paren(mut expr_paren) => match *expr_paren.expr {
+                        syn::Expr::Cast(cast)
+                            if utils::consume_attribute(
+                                &mut expr_paren.attrs,
+                                &syn::parse_quote! {#[local_slot]},
+                            ) =>
+                        {
+                            self.expand_local_slot_macro(cast)
+                                .map_err(syn::Error::into_compile_error)
+                                .map_or_else(syn::Expr::Verbatim, syn::Expr::Field)
+                        }
+                        expr => {
+                            *expr_paren.expr = expr;
+                            syn::Expr::Paren(expr_paren)
+                        }
+                    },
                     syn::Expr::Macro(syn::ExprMacro {
                         attrs,
                         mac: syn::Macro { path, tokens, .. },
@@ -187,6 +195,8 @@ mod local_slots {
         EnterFn(kw::enter),
         #[peek(kw::context, name = "EnterCtx")]
         EnterCtx(kw::context),
+        #[peek(kw::init_context_type, name = "InitCtxTy")]
+        InitCtxTy(kw::init_context_type),
     }
 
     impl quote::ToTokens for InterfaceTy {
@@ -196,6 +206,7 @@ mod local_slots {
                 InterfaceTy::InitFn(tk) => tk.to_tokens(tokens),
                 InterfaceTy::EnterFn(tk) => tk.to_tokens(tokens),
                 InterfaceTy::EnterCtx(tk) => tk.to_tokens(tokens),
+                InterfaceTy::InitCtxTy(tk) => tk.to_tokens(tokens),
             }
         }
     }
@@ -207,6 +218,7 @@ mod local_slots {
                 InterfaceTy::InitFn(_) => "init",
                 InterfaceTy::EnterFn(_) => "enter",
                 InterfaceTy::EnterCtx(_) => "context",
+                InterfaceTy::InitCtxTy(_) => "init_context_type",
             }
             .fmt(f)
         }
@@ -217,6 +229,7 @@ mod local_slots {
                 InterfaceTy::InitFn(tk) => tk.span(),
                 InterfaceTy::EnterFn(tk) => tk.span(),
                 InterfaceTy::EnterCtx(tk) => tk.span(),
+                InterfaceTy::InitCtxTy(tk) => tk.span(),
             })
         }
     }
@@ -247,12 +260,15 @@ mod local_slots {
         syn::custom_keyword!(init);
         syn::custom_keyword!(enter);
         syn::custom_keyword!(context);
+        syn::custom_keyword!(init_context_type);
     }
 
     #[derive(FromMeta, Default)]
     pub struct Args {
         #[darling(default)]
         pub namespace: Namespace,
+        #[darling(default)]
+        pub bounds: syn::punctuated::Punctuated<syn::TraitBound, syn::Token![+]>,
     }
 
     #[derive(Debug, Parse, PartialEq, Eq)]
@@ -368,7 +384,7 @@ mod nested_slots {
                     call.func.path =
                         InterfaceTy::EnterFn(Default::default()).mangle_path(call.func.path)?;
                     call.args.push(syn::parse2(
-                        quote! { &mut local_slot!(#init_path() as #type_path) },
+                        quote! { &mut local_slot!(#init_path(init_context) as #type_path) },
                     )?);
 
                     syn::parse2(call.into_token_stream())
@@ -587,21 +603,25 @@ mod tests {
     use local_slots::Api;
 
     macro_rules! compare_foos {
-        ($generate_from:literal, $expected:literal) => {
+        ($args:expr, $generate_from:literal, $expected:literal) => {
             let generated: Api = nested_slots_impl(
-                local_slots::Args::default(),
-                syn::parse_str($generate_from).unwrap(),
+                $args,
+                syn::parse_str($generate_from).expect("Invalid first argument"),
             )
-            .unwrap();
-            let expected: Api = syn::parse_str(
-                &format!($expected,
-                    foo_type = get_interface!(type foo).get_ident().unwrap(),
-                    foo_init = get_interface!(init foo).get_ident().unwrap(),
-                    foo_enter = get_interface!(enter foo).get_ident().unwrap(),
-                    context = get_interface!(context).get_ident().unwrap(),
-                )
-            ).unwrap();
+            .expect("Unable to generate output");
+            let expected: Api = syn::parse_str(&format!(
+                $expected,
+                type_suffix = get_interface!(type).get_ident().unwrap(),
+                init_suffix = get_interface!(init).get_ident().unwrap(),
+                enter_suffix = get_interface!(enter).get_ident().unwrap(),
+                context = get_interface!(context).get_ident().unwrap(),
+                init_context_type = get_interface!(init_context_type).get_ident().unwrap(),
+            ))
+            .expect("Invalid second argument");
             assert_eq!(generated, expected);
+        };
+        ($generate_from:literal, $expected:literal) => {
+            compare_foos!(local_slots::Args::default(), $generate_from, $expected)
         };
     }
 
@@ -619,9 +639,28 @@ mod tests {
             ",
             "
                 #[allow(non_camel_case_types)]
-                type {foo_type};
-                fn {foo_init}() -> self:: {foo_type};
-                fn {foo_enter}({context}: &mut self:: {foo_type});
+                type foo_{type_suffix};
+                fn foo_{init_suffix}<{init_context_type}>(init_context: &mut {init_context_type}) -> self:: foo_{type_suffix};
+                fn foo_{enter_suffix}({context}: &mut self:: foo_{type_suffix});
+            "
+        );
+    }
+
+    #[test]
+    fn init_context_bounds() {
+        compare_foos!(
+            local_slots::Args{
+                bounds: syn::parse_quote! { AsRef<str> + AsRef<u8> },
+                ..Default::default()
+            },
+            "
+                fn foo();
+            ",
+            "
+                #[allow(non_camel_case_types)]
+                type foo_{type_suffix};
+                fn foo_{init_suffix}<{init_context_type}: AsRef<str> + AsRef<u8>>(init_context: &mut {init_context_type}) -> self:: foo_{type_suffix};
+                fn foo_{enter_suffix}({context}: &mut self:: foo_{type_suffix});
             "
         );
     }
@@ -641,15 +680,17 @@ mod tests {
             ",
             "
                 #[allow(non_camel_case_types)]
-                type {foo_type} = (u8, u8, u8, {foo_type}, {foo_type},);
-                fn {foo_init}() -> self:: {foo_type} {{ (3, 2, 1, {foo_init}(), {foo_init}(),) }}
-                fn {foo_enter}({context}: &mut self:: {foo_type}) {{
+                type foo_{type_suffix} = (u8, u8, u8, foo_{type_suffix}, foo_{type_suffix},);
+                fn foo_{init_suffix}<{init_context_type}>(init_context: &mut {init_context_type}) -> self:: foo_{type_suffix} {{
+                    (3, 2, 1, foo_{init_suffix}(init_context), foo_{init_suffix}(init_context),)
+                }}
+                fn foo_{enter_suffix}({context}: &mut self:: foo_{type_suffix}) {{
                     let ref mut x: u8 = {context}.0;
-                    &mut ({context}.1);
+                    &mut {context}.1;
                     &mut {context}.2;
 
-                    {foo_enter}(&mut {context}.3);
-                    {foo_enter}(&mut {context}.4);
+                    foo_{enter_suffix}(&mut {context}.3);
+                    foo_{enter_suffix}(&mut {context}.4);
                 }}
             "
         );
