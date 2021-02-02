@@ -7,7 +7,7 @@ mod local_slots {
     use darling::FromMeta;
     use derive_syn_parse::Parse;
     use proc_macro2::{Span, TokenStream as TokenStream2};
-    use quote::{format_ident, quote, TokenStreamExt};
+    use quote::{format_ident, quote, ToTokens, TokenStreamExt};
     use syn::spanned::Spanned;
 
     pub fn local_slots_impl(
@@ -76,8 +76,58 @@ mod local_slots {
             fn visit_item_mut(&mut self, _: &mut syn::Item) {
                 // ignore
             }
+            fn visit_local_mut(&mut self, local: &mut syn::Local) {
+                if utils::consume_attribute(&mut local.attrs, &syn::parse_quote! {#[local_slot]}) {
+                    local.init.as_mut().unwrap().1 = Box::new(
+                        syn::parse2(local.to_token_stream())
+                            .and_then(expand_local_slot_macro_local)
+                            .map_err(syn::Error::into_compile_error)
+                            .map_or_else(syn::Expr::Verbatim, syn::Expr::Macro),
+                    );
+                }
+                syn::visit_mut::visit_local_mut(self, local);
+
+                #[derive(Parse)]
+                #[allow(dead_code)]
+                struct LocalForSlot {
+                    #[call(syn::Attribute::parse_outer)]
+                    attrs: Vec<syn::Attribute>,
+                    let_token: syn::Token![let],
+                    pat: syn::Pat,
+                    colon_token: syn::Token![:],
+                    ty: syn::Type,
+                    eq_token: syn::Token![=],
+                    expr: syn::Expr,
+                    semi_token: syn::Token![;],
+                }
+
+                fn expand_local_slot_macro_local(
+                    local: LocalForSlot,
+                ) -> syn::Result<syn::ExprMacro> {
+                    let ty = local.ty.clone();
+                    let expr = local.expr.clone();
+                    syn::parse2(quote! { local_slot!(#expr as #ty) })
+                }
+            }
             fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
-                match expr {
+                // replace expr with empty `TokenStream` then process its previous value and assign that back to `*expr`
+                *expr = match std::mem::replace(expr, syn::Expr::Verbatim(Default::default())) {
+                    syn::Expr::Paren(mut expr_paren) => {
+                        *expr_paren.expr = match *expr_paren.expr {
+                            syn::Expr::Cast(cast)
+                                if utils::consume_attribute(
+                                    &mut expr_paren.attrs,
+                                    &syn::parse_quote! {#[local_slot]},
+                                ) =>
+                            {
+                                self.expand_local_slot_macro(cast)
+                                    .map_err(syn::Error::into_compile_error)
+                                    .map_or_else(syn::Expr::Verbatim, syn::Expr::Field)
+                            }
+                            expr => expr,
+                        };
+                        syn::Expr::Paren(expr_paren)
+                    }
                     syn::Expr::Macro(syn::ExprMacro {
                         attrs,
                         mac: syn::Macro { path, tokens, .. },
@@ -87,24 +137,26 @@ mod local_slots {
                             None => false,
                         } =>
                     {
-                        *expr = || -> syn::Result<syn::ExprField> {
-                            let syn::ExprCast { expr, ty, .. } =
-                                syn::parse2::<syn::ExprCast>(std::mem::take(tokens))?;
-
-                            // expand `local_slot!(...)` macro
-
-                            let ctx =
-                                InterfaceTy::EnterCtx(Default::default()).into_mangled_ident();
-                            let i = syn::Index::from(self.0.len());
-                            self.0.push((*ty, *expr));
-                            syn::parse2(quote! { #ctx . #i })
-                        }()
-                        .map_err(syn::Error::into_compile_error)
-                        .map_or_else(syn::Expr::Verbatim, syn::Expr::Field);
+                        syn::parse2::<syn::ExprCast>(tokens)
+                            .and_then(|cast| self.expand_local_slot_macro(cast))
+                            .map_err(syn::Error::into_compile_error)
+                            .map_or_else(syn::Expr::Verbatim, syn::Expr::Field)
                     }
-                    _ => (),
-                }
+                    expr => expr,
+                };
                 syn::visit_mut::visit_expr_mut(self, expr);
+            }
+        }
+
+        impl LocalSlotMacroExpander {
+            fn expand_local_slot_macro(
+                &mut self,
+                syn::ExprCast { ty, expr, .. }: syn::ExprCast,
+            ) -> syn::Result<syn::ExprField> {
+                let ctx = InterfaceTy::EnterCtx(Default::default()).into_mangled_ident();
+                let i = syn::Index::from(self.0.len());
+                self.0.push((*ty, *expr));
+                syn::parse2(quote! { #ctx . #i })
             }
         }
     }
@@ -256,7 +308,7 @@ mod local_slots {
 mod nested_slots {
     use crate::{local_slots::*, utils};
     use derive_syn_parse::Parse;
-    use quote::quote;
+    use quote::{quote, ToTokens};
     use syn::visit_mut::VisitMut;
 
     pub fn nested_slots_impl(args: Args, mut input: utils::UniversalItemFn) -> syn::Result<Api> {
@@ -275,6 +327,14 @@ mod nested_slots {
             }
             fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
                 match expr {
+                    syn::Expr::Call(call) => {
+                        if utils::consume_attribute(&mut call.attrs, &syn::parse_quote! {#[nest]}) {
+                            *expr = syn::parse2(call.into_token_stream())
+                                .and_then(expand_nest_macro)
+                                .map_err(syn::Error::into_compile_error)
+                                .map_or_else(syn::Expr::Verbatim, syn::Expr::Call)
+                        }
+                    }
                     syn::Expr::Macro(syn::ExprMacro {
                         attrs,
                         mac: syn::Macro { path, tokens, .. },
@@ -284,37 +344,38 @@ mod nested_slots {
                             None => false,
                         } =>
                     {
-                        *expr = || -> syn::Result<syn::ExprCall> {
-                            let mut call: Call = syn::parse2(std::mem::take(tokens))?;
-                            // expand `nest!(...)` macro
-
-                            let init_path = syn::ExprPath {
-                                attrs: Vec::new(),
-                                path: InterfaceTy::InitFn(Default::default())
-                                    .mangle_path(call.func.path.clone())?,
-                                qself: call.func.qself.clone(),
-                            };
-                            let type_path = syn::ExprPath {
-                                attrs: Vec::new(),
-                                path: InterfaceTy::Type(Default::default())
-                                    .mangle_path(call.func.path.clone())?,
-                                qself: call.func.qself.clone(),
-                            };
-
-                            call.func.path = InterfaceTy::EnterFn(Default::default())
-                                .mangle_path(call.func.path)?;
-                            call.args.push(syn::parse2(
-                                quote! { &mut local_slot!(#init_path() as #type_path) },
-                            )?);
-
-                            syn::parse2(quote! { #call })
-                        }()
-                        .map_err(syn::Error::into_compile_error)
-                        .map_or_else(syn::Expr::Verbatim, syn::Expr::Call);
+                        *expr = syn::parse2(std::mem::take(tokens))
+                            .and_then(expand_nest_macro)
+                            .map_err(syn::Error::into_compile_error)
+                            .map_or_else(syn::Expr::Verbatim, syn::Expr::Call)
                     }
+
                     _ => (),
                 }
                 syn::visit_mut::visit_expr_mut(self, expr);
+
+                fn expand_nest_macro(mut call: Call) -> syn::Result<syn::ExprCall> {
+                    let init_path = syn::ExprPath {
+                        attrs: Vec::new(),
+                        path: InterfaceTy::InitFn(Default::default())
+                            .mangle_path(call.func.path.clone())?,
+                        qself: call.func.qself.clone(),
+                    };
+                    let type_path = syn::ExprPath {
+                        attrs: Vec::new(),
+                        path: InterfaceTy::Type(Default::default())
+                            .mangle_path(call.func.path.clone())?,
+                        qself: call.func.qself.clone(),
+                    };
+
+                    call.func.path =
+                        InterfaceTy::EnterFn(Default::default()).mangle_path(call.func.path)?;
+                    call.args.push(syn::parse2(
+                        quote! { &mut local_slot!(#init_path() as #type_path) },
+                    )?);
+
+                    syn::parse2(call.into_token_stream())
+                }
             }
         }
 
@@ -505,6 +566,19 @@ mod utils {
             semi_token.to_tokens(tokens);
         }
     }
+
+    /// Returns true on consumption of one attribute from `attrs` if it equals to `attr_to_consume`
+    pub fn consume_attribute(
+        attrs: &mut Vec<syn::Attribute>,
+        attr_to_consume: &syn::Attribute,
+    ) -> bool {
+        if let Some(i) = attrs.iter().position(|attr| attr == attr_to_consume) {
+            attrs.remove(i);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -547,6 +621,7 @@ mod tests {
                 fn foo();
             ",
             "
+                #[allow(non_camel_case_types)]
                 type {foo_type};
                 fn {foo_init}() -> self:: {foo_type};
                 fn {foo_enter}({context}: &mut self:: {foo_type});
@@ -555,47 +630,30 @@ mod tests {
     }
 
     #[test]
-    fn no_slot() {
-        compare_foos!(
-            "
-                fn foo() {}
-            ",
-            "
-                type {foo_type} = ();
-                fn {foo_init}() -> self:: {foo_type} {{ () }}
-                fn {foo_enter}({context}: &mut self:: {foo_type}) {{}}
-            "
-        );
-    }
-
-    #[test]
-    fn one_local_slot() {
+    fn nested_slots() {
         compare_foos!(
             "
                 fn foo() {
-                    local_slot!(69 as i32);
-                }
-            ",
-            "
-                type {foo_type} = (i32,);
-                fn {foo_init}() -> self:: {foo_type} {{ (69,) }}
-                fn {foo_enter}({context}: &mut self:: {foo_type}) {{ {context}.0; }}
-            "
-        );
-    }
+                    #[local_slot] let ref mut x: u8 = 3;
+                    &mut #[local_slot] (2 as u8);
+                    &mut local_slot!(1 as u8);
 
-    #[test]
-    fn one_nested_slot() {
-        compare_foos!(
-            "
-                fn foo() {
                     nest!(foo());
+                    #[nest] foo();
                 }
             ",
             "
-                type {foo_type} = ({foo_type},);
-                fn {foo_init}() -> self:: {foo_type} {{ ({foo_init}(),) }}
-                fn {foo_enter}({context}: &mut self:: {foo_type}) {{ {foo_enter}(&mut {context}.0); }}
+                #[allow(non_camel_case_types)]
+                type {foo_type} = (u8, u8, u8, {foo_type}, {foo_type},);
+                fn {foo_init}() -> self:: {foo_type} {{ (3, 2, 1, {foo_init}(), {foo_init}(),) }}
+                fn {foo_enter}({context}: &mut self:: {foo_type}) {{
+                    let ref mut x: u8 = {context}.0;
+                    &mut ({context}.1);
+                    &mut {context}.2;
+
+                    {foo_enter}(&mut {context}.3);
+                    {foo_enter}(&mut {context}.4);
+                }}
             "
         );
     }

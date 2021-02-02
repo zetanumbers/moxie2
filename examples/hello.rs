@@ -13,7 +13,8 @@ struct Foo;
 impl InnerRoot for Foo {
     #[nested_slots(namespace = "Self")]
     fn inner_root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
-        let state = &mut local_slot!(None as Option<(StateGetter<String>, StateSetter<String>)>);
+        #[local_slot]
+        let ref mut state: Option<(StateGetter<String>, StateSetter<String>)> = None;
         let state = state.get_or_insert_with(|| state_builder.build("World".to_string()));
 
         (format!("Hello {}!", state.0.get()), state.1.clone())
@@ -22,7 +23,8 @@ impl InnerRoot for Foo {
 
 #[nested_slots]
 fn root(state_builder: &mut StateBuilder) -> (String, StateSetter<String>) {
-    nest![<Foo as InnerRoot>::inner_root(state_builder)]
+    #[nest]
+    <Foo as InnerRoot>::inner_root(state_builder)
 }
 
 async fn async_main(callbacks: Arc<RwLock<Option<StateSetter<String>>>>) {
