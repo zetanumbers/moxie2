@@ -7,11 +7,11 @@ edition = "2018"
 [dependencies]
 parking_lot = "0.11.1"
 futures = { version = "0.3.12", default-features = false }
-moxie2_macros = { path = "macros" }
+nested_slots = { path = "nested_slots" }
 
 [dev-dependencies]
 async-std = "1.9.0"
 futures = { version = "0.3.12", features = ["executor"] }
 
 [workspace]
-members = ["macros"]
+members = ["nested_slots", "nested_slots/impl"]

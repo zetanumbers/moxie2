@@ -1,0 +1,18 @@
+[package]
+name = "nested_slots"
+version = "0.1.0"
+authors = ["zetanumbers <zeta0.114942@gmail.com>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+nested_slots_impl = { path = "impl" }
+darling = "0.12.0"
+quote = "1.0.9"
+
+[dependencies.syn]
+version = "1.0.60"
+default-features = false
+features = ["parsing", "printing", "proc-macro"]
