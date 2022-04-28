@@ -9,7 +9,7 @@ proc-macro = true
 
 [dependencies]
 nested_slots_impl = { path = "impl" }
-darling = "0.13.0"
+darling = "0.14.1"
 quote = "1.0.9"
 
 [dependencies.syn]
