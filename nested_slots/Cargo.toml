@@ -13,6 +13,6 @@ darling = "0.13.0"
 quote = "1.0.9"
 
 [dependencies.syn]
-version = "1.0.60"
+version = "2.0.10"
 default-features = false
 features = ["parsing", "printing", "proc-macro"]
